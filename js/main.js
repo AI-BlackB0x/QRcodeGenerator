@@ -27,7 +27,7 @@ const elements = {
   qrResult:        document.getElementById('qr-result'),
   qrPlaceholder:   document.getElementById('qr-placeholder'),
   qrOutput:        document.getElementById('qr-output'),
-  qrContainer:     document.getElementById('qr-canvas'),   // now a div
+  qrDisplayCanvas: document.getElementById('qr-display-canvas'), // our controlled canvas
   downloadActions: document.getElementById('download-actions'),
   downloadPng:     document.getElementById('download-png-btn'),
   copyBtn:         document.getElementById('copy-btn'),
@@ -39,9 +39,10 @@ const elements = {
 /* ================================================
    STATE
    ================================================ */
-let qrInstance  = null;
-let qrGenerated = false;
-let lastInput   = '';
+let qrInstance       = null;
+let qrGenerated      = false;
+let lastInput        = '';
+let lastDownloadDataUrl = '';  // full-res data URL for download
 
 /* ================================================
    HEADER — Sticky scroll + mobile nav
@@ -190,19 +191,18 @@ const initColorPickers = () => {
 };
 
 /* ================================================
-   QR CODE GENERATION — using qrcodejs library
+   QR CODE GENERATION — renders to hidden div, copies to display canvas
    ================================================ */
 const generateQRCode = (text, showLoader = true) => {
-  const container  = elements.qrContainer;
-  const output     = elements.qrOutput;
-  const placeholder = elements.qrPlaceholder;
-  const qrResult   = elements.qrResult;
-  const dlActions  = elements.downloadActions;
-  const btn        = elements.generateBtn;
+  const displayCanvas = elements.qrDisplayCanvas;
+  const output        = elements.qrOutput;
+  const placeholder   = elements.qrPlaceholder;
+  const qrResult      = elements.qrResult;
+  const dlActions     = elements.downloadActions;
+  const btn           = elements.generateBtn;
 
-  if (!container || !text.trim()) return;
+  if (!displayCanvas || !text.trim()) return;
 
-  // Loading state
   if (showLoader && btn) {
     btn.classList.add('loading');
     btn.setAttribute('disabled', 'true');
@@ -212,64 +212,85 @@ const generateQRCode = (text, showLoader = true) => {
   const darkColor  = elements.darkColor?.value  || '#1a1a4e';
   const lightColor = elements.lightColor?.value || '#ffffff';
 
-  // Cap display size at 280px for clean UI; download still uses full res
-  const displaySize = Math.min(sizeVal, 280);
+  // Display canvas is always 240px — clean and contained
+  const DISPLAY_SIZE = 240;
 
   try {
-    // Clear previous QR
-    container.innerHTML = '';
+    // 1. Create QR at full resolution in a hidden off-screen div
+    const hiddenDiv = document.createElement('div');
+    hiddenDiv.style.cssText = 'position:fixed;left:-9999px;top:-9999px;visibility:hidden;pointer-events:none;';
+    document.body.appendChild(hiddenDiv);
 
-    // Create new QR using qrcodejs
-    qrInstance = new QRCode(container, {
-      text:            text.trim(),
-      width:           displaySize,
-      height:          displaySize,
-      colorDark:       darkColor,
-      colorLight:      lightColor,
-      correctLevel:    QRCode.CorrectLevel.H,
+    new QRCode(hiddenDiv, {
+      text:         text.trim(),
+      width:        sizeVal,
+      height:       sizeVal,
+      colorDark:    darkColor,
+      colorLight:   lightColor,
+      correctLevel: QRCode.CorrectLevel.H,
     });
 
-    // Show results (slight delay for render)
     setTimeout(() => {
-      // Force canvas/img size inline so it never overflows
-      const rendered = container.querySelector('canvas') || container.querySelector('img');
-      if (rendered) {
-        const capped = Math.min(displaySize, 280);
-        if (rendered.tagName === 'CANVAS') {
-          // CSS scale — keeps internal resolution intact for download
-          rendered.style.width     = capped + 'px';
-          rendered.style.height    = capped + 'px';
-          rendered.style.maxWidth  = '100%';
-          rendered.style.maxHeight = '100%';
-          rendered.style.display   = 'block';
+      // 2. Get the generated canvas from hidden div
+      const sourceCanvas = hiddenDiv.querySelector('canvas');
+      const sourceImg    = hiddenDiv.querySelector('img');
+
+      // 3. Draw into our display canvas at DISPLAY_SIZE
+      displayCanvas.width  = DISPLAY_SIZE;
+      displayCanvas.height = DISPLAY_SIZE;
+      const ctx = displayCanvas.getContext('2d');
+
+      const drawSource = (src) => {
+        ctx.clearRect(0, 0, DISPLAY_SIZE, DISPLAY_SIZE);
+        ctx.drawImage(src, 0, 0, DISPLAY_SIZE, DISPLAY_SIZE);
+
+        // Save full-res data URL for download
+        if (sourceCanvas) {
+          lastDownloadDataUrl = sourceCanvas.toDataURL('image/png');
         } else {
-          // img tag fallback
-          rendered.style.maxWidth  = capped + 'px';
-          rendered.style.maxHeight = capped + 'px';
-          rendered.style.width     = 'auto';
-          rendered.style.height    = 'auto';
-          rendered.style.display   = 'block';
+          lastDownloadDataUrl = displayCanvas.toDataURL('image/png');
+        }
+
+        // Show UI
+        if (placeholder) placeholder.style.display = 'none';
+        if (output)      output.style.display = 'flex';
+        if (qrResult)    qrResult.classList.add('has-qr');
+        if (dlActions)   dlActions.style.display = 'flex';
+
+        qrGenerated = true;
+        lastInput   = text.trim();
+
+        if (showLoader && btn) {
+          btn.classList.remove('loading');
+          btn.removeAttribute('disabled');
+        }
+
+        // Cleanup hidden div
+        document.body.removeChild(hiddenDiv);
+
+        // Mobile scroll
+        if (window.innerWidth <= 768) {
+          output.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      };
+
+      if (sourceCanvas) {
+        drawSource(sourceCanvas);
+      } else if (sourceImg) {
+        if (sourceImg.complete) {
+          drawSource(sourceImg);
+        } else {
+          sourceImg.onload = () => drawSource(sourceImg);
+        }
+      } else {
+        document.body.removeChild(hiddenDiv);
+        showToast('שגיאה ביצירת הקוד.', false);
+        if (showLoader && btn) {
+          btn.classList.remove('loading');
+          btn.removeAttribute('disabled');
         }
       }
-
-      if (placeholder) placeholder.style.display = 'none';
-      if (output)      output.style.display      = 'flex';
-      if (qrResult)    qrResult.classList.add('has-qr');
-      if (dlActions)   dlActions.style.display   = 'flex';
-
-      qrGenerated = true;
-      lastInput   = text.trim();
-
-      if (showLoader && btn) {
-        btn.classList.remove('loading');
-        btn.removeAttribute('disabled');
-      }
-
-      // Mobile scroll into view
-      if (window.innerWidth <= 768) {
-        output.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }
-    }, 200);
+    }, 250);
 
   } catch (err) {
     console.error('QR generation error:', err);
@@ -282,13 +303,9 @@ const generateQRCode = (text, showLoader = true) => {
 };
 
 /* ================================================
-   GET QR CANVAS — extracts canvas from qrcodejs container
+   GET DISPLAY CANVAS
    ================================================ */
-const getQRCanvas = () => {
-  const container = elements.qrContainer;
-  if (!container) return null;
-  return container.querySelector('canvas') || container.querySelector('img');
-};
+const getQRCanvas = () => elements.qrDisplayCanvas || null;
 
 /* ================================================
    GENERATE BUTTON
@@ -332,57 +349,20 @@ const initGenerateButton = () => {
 };
 
 /* ================================================
-   DOWNLOAD PNG — creates a high-res QR for download
+   DOWNLOAD PNG — uses saved full-res data URL
    ================================================ */
 const initDownload = () => {
   const btn = elements.downloadPng;
   if (!btn) return;
 
   btn.addEventListener('click', () => {
-    if (!qrGenerated || !lastInput) return;
-
+    if (!qrGenerated || !lastDownloadDataUrl) return;
     try {
-      const fullSize   = parseInt(elements.sizeSelect?.value || '300');
-      const darkColor  = elements.darkColor?.value  || '#1a1a4e';
-      const lightColor = elements.lightColor?.value || '#ffffff';
-
-      // Create a hidden temp container for high-res QR
-      const tempDiv = document.createElement('div');
-      tempDiv.style.cssText = 'position:absolute;left:-9999px;top:-9999px;visibility:hidden;';
-      document.body.appendChild(tempDiv);
-
-      const tempQR = new QRCode(tempDiv, {
-        text:         lastInput,
-        width:        fullSize,
-        height:       fullSize,
-        colorDark:    darkColor,
-        colorLight:   lightColor,
-        correctLevel: QRCode.CorrectLevel.H,
-      });
-
-      setTimeout(() => {
-        const canvas = tempDiv.querySelector('canvas');
-        const img    = tempDiv.querySelector('img');
-
-        if (canvas) {
-          const link    = document.createElement('a');
-          link.download = 'qr-shirden.png';
-          link.href     = canvas.toDataURL('image/png');
-          link.click();
-          showToast('הקובץ הורד בהצלחה! ✓', true);
-        } else if (img) {
-          const link    = document.createElement('a');
-          link.download = 'qr-shirden.png';
-          link.href     = img.src;
-          link.click();
-          showToast('הקובץ הורד בהצלחה! ✓', true);
-        } else {
-          showToast('שגיאה בהורדה. נסה שוב.', false);
-        }
-
-        document.body.removeChild(tempDiv);
-      }, 300);
-
+      const link    = document.createElement('a');
+      link.download = 'qr-shirden.png';
+      link.href     = lastDownloadDataUrl;
+      link.click();
+      showToast('הקובץ הורד בהצלחה! ✓', true);
     } catch (err) {
       console.error('Download error:', err);
       showToast('שגיאה בהורדה. נסה שוב.', false);
@@ -398,28 +378,14 @@ const initCopyButton = () => {
   if (!btn) return;
 
   btn.addEventListener('click', async () => {
-    if (!qrGenerated) return;
-
-    const canvasEl = getQRCanvas();
-    if (!canvasEl) return;
-
+    if (!qrGenerated || !lastDownloadDataUrl) return;
     try {
-      if (canvasEl.tagName === 'CANVAS') {
-        canvasEl.toBlob(async (blob) => {
-          if (!blob) { showToast('שגיאה בהעתקה.', false); return; }
-          try {
-            await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-            showToast('התמונה הועתקה ללוח!', true);
-          } catch {
-            showToast('הדפדפן לא תומך בהעתקת תמונה. השתמש בהורדה.', false);
-          }
-        }, 'image/png');
-      } else {
-        await navigator.clipboard.writeText(canvasEl.src);
-        showToast('ה-URL הועתק ללוח!', true);
-      }
-    } catch (err) {
-      showToast('לא ניתן להעתיק. נסה להוריד.', false);
+      const res  = await fetch(lastDownloadDataUrl);
+      const blob = await res.blob();
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      showToast('התמונה הועתקה ללוח!', true);
+    } catch {
+      showToast('הדפדפן לא תומך בהעתקת תמונה. השתמש בהורדה.', false);
     }
   });
 };
